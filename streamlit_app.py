@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 
-TABLE = "TabY"   
+TABLES = ["TabX", "TabY", "Iss_Description"]
 
 @st.cache_resource
 def init_connection():
@@ -16,5 +16,7 @@ def load(table):
     return pd.DataFrame(res.data)
 
 st.title("My data")
-df = load(TABLE)
-st.dataframe(df)
+
+for t in TABLES:
+    st.subheader(t)
+    st.dataframe(load(t))
