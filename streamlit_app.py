@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import html as ht
 from supabase import create_client
 
 # Lookup tables: table name, value column, id column used for sorting
@@ -40,8 +41,11 @@ def load_issue(iss_id):
     )
     return pd.DataFrame(res.data)
 
-def join_text(s):
-    return " | ".join(s.dropna().astype(str))
+# def join_text(s):
+#    return " | ".join(s.dropna().astype(str))
+def join_html(s):
+    return "<br>".join(html.escape(str(x)) for x in s.dropna())
+    
 
 st.title("Issue matrix")
 
@@ -93,7 +97,7 @@ else:
         index="level",
         columns="co_factor",
         values="comment_short",
-        aggfunc=join_text,
+        aggfunc=join_html,
         fill_value="",
     )
     # follow the sort order of the lookup tables, unknown values at the end
@@ -101,4 +105,33 @@ else:
            [l for l in matrix.index if l not in levels]
     cols = [c for c in cofactors if c in matrix.columns] + \
            [c for c in matrix.columns if c not in cofactors]
-    st.dataframe(matrix.loc[rows, cols], use_container_width=True)
+    matrix = matrix.loc[rows, cols]
+
+    # make the labels safe for HTML and tidy the corner
+    matrix = matrix.rename(index=html.escape, columns=html.escape)
+    matrix.index.name = None
+    matrix.columns.name = None
+
+    st.markdown(
+        """
+        <style>
+        .matrix table {border-collapse: collapse; width: 100%;}
+        .matrix th, .matrix td {
+            border: 1px solid rgba(128,128,128,0.4);
+            padding: 6px 8px;
+            vertical-align: top;
+            text-align: left;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            min-width: 120px;
+        }
+        .matrix th {background: rgba(128,128,128,0.15);}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="matrix" style="overflow-x:auto">'
+        f'{matrix.to_html(escape=False, border=0)}</div>',
+        unsafe_allow_html=True,
+    )
