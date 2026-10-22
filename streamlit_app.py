@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import html as ht
+import html
 from supabase import create_client
 
 # Lookup tables: table name, value column, id column used for sorting
