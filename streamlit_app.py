@@ -2,7 +2,14 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 
-TABLES = ["TabX", "TabY", "Iss_Description"]
+TABLES = [
+    "iss_description",
+    "iss_collection",
+    "level_list",
+    "co_factors_list",
+    "tab_y",
+    "tab_x",
+]
 
 @st.cache_resource
 def init_connection():
@@ -19,4 +26,11 @@ st.title("My data")
 
 for t in TABLES:
     st.subheader(t)
-    st.dataframe(load(t))
+    try:
+        df = load(t)
+        if df.empty:
+            st.info("No rows, or no read policy for this table yet.")
+        else:
+            st.dataframe(df, use_container_width=True)
+    except Exception as e:
+        st.error(f"Could not load {t}: {e}")
