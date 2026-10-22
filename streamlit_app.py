@@ -2,14 +2,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 
-TABLES = [
-    "iss_description",
-    "iss_collection",
-    "level_list",
-    "co_factors_list",
-    "tab_y",
-    "tab_x",
-]
+ISS_ID = "Iss01"
 
 @st.cache_resource
 def init_connection():
@@ -18,19 +11,30 @@ def init_connection():
 supabase = init_connection()
 
 @st.cache_data(ttl=60)
-def load(table):
-    res = supabase.table(table).select("*").execute()
+def load_issue(iss_id):
+    res = (
+        supabase.table("iss_collection")
+        .select("*")
+        .eq("iss_id", iss_id)
+        .execute()
+    )
     return pd.DataFrame(res.data)
 
-st.title("My data")
+def join_text(s):
+    return " | ".join(s.dropna().astype(str))
 
-for t in TABLES:
-    st.subheader(t)
-    try:
-        df = load(t)
-        if df.empty:
-            st.info("No rows, or no read policy for this table yet.")
-        else:
-            st.dataframe(df, use_container_width=True)
-    except Exception as e:
-        st.error(f"Could not load {t}: {e}")
+st.title(f"Matrix for {ISS_ID}")
+
+df = load_issue(ISS_ID)
+
+if df.empty:
+    st.info(f"No rows found for iss_id = {ISS_ID}, or no read policy on iss_collection.")
+else:
+    matrix = df.pivot_table(
+        index="level",
+        columns="co_factor",
+        values="comment_short",
+        aggfunc=join_text,
+        fill_value="",
+    )
+    st.dataframe(matrix, use_container_width=True)
