@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 
-# Lookup tables: table name and the column holding the values
-LEVEL_TABLE, LEVEL_COL = "level_list", "level"
-COFACTOR_TABLE, COFACTOR_COL = "co_factors_list", "co_factor"
+# Lookup tables: table name, value column, id column used for sorting
+LEVEL_TABLE, LEVEL_COL, LEVEL_ID_COL = "level_list", "level", "level_id"
+COFACTOR_TABLE, COFACTOR_COL, COFACTOR_ID_COL = "co_factors_list", "co_factor", "co_factor_id"
 
 @st.cache_resource
 def init_connection():
@@ -13,14 +13,21 @@ def init_connection():
 supabase = init_connection()
 
 @st.cache_data(ttl=300)
-def load_options(table, col):
+def load_options(table, col, id_col):
     res = supabase.table(table).select("*").execute()
     df = pd.DataFrame(res.data)
-    if col not in df.columns:
-        raise KeyError(
-            f"Column '{col}' not found in {table}. "
-            f"Available columns: {list(df.columns)}"
-        )
+    for c in (col, id_col):
+        if c not in df.columns:
+            raise KeyError(
+                f"Column '{c}' not found in {table}. "
+                f"Available columns: {list(df.columns)}"
+            )
+    # sort ascending by the id column (numerically if all ids are numbers)
+    ids = pd.to_numeric(df[id_col], errors="coerce")
+    if ids.notna().all():
+        df = df.assign(_key=ids).sort_values("_key")
+    else:
+        df = df.sort_values(id_col)
     return df[col].dropna().astype(str).drop_duplicates().tolist()
 
 @st.cache_data(ttl=60)
@@ -44,16 +51,16 @@ iss_id = st.text_input("Issue ID", value="Iss01").strip()
 st.subheader("Add an entry")
 
 try:
-    levels = load_options(LEVEL_TABLE, LEVEL_COL)
-    cofactors = load_options(COFACTOR_TABLE, COFACTOR_COL)
+    levels = load_options(LEVEL_TABLE, LEVEL_COL, LEVEL_ID_COL)
+    cofactors = load_options(COFACTOR_TABLE, COFACTOR_COL, COFACTOR_ID_COL)
 except Exception as e:
     st.error(str(e))
     st.stop()
 
 with st.form("add_entry", clear_on_submit=True):
+    comment = st.text_input("Short comment (max. 80 characters)", max_chars=80)
     level = st.selectbox("Level", levels)
     co_factor = st.selectbox("Co-factor", cofactors)
-    comment = st.text_area("Short comment", max_chars=500)
     submitted = st.form_submit_button("Add")
 
 if submitted:
@@ -89,7 +96,7 @@ else:
         aggfunc=join_text,
         fill_value="",
     )
-    # keep the order of the lookup tables, extra values at the end
+    # follow the sort order of the lookup tables, unknown values at the end
     rows = [l for l in levels if l in matrix.index] + \
            [l for l in matrix.index if l not in levels]
     cols = [c for c in cofactors if c in matrix.columns] + \
