@@ -47,7 +47,7 @@ def join_html(s):
     return "<br>".join(html.escape(str(x)) for x in s.dropna())
     
 
-st.title("Issue matrix")
+st.title("Input form for Issue Collection with Matrix View")
 
 iss_id = st.text_input("Issue ID", value="Iss01").strip()
 
