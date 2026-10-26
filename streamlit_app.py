@@ -10,7 +10,7 @@ COFACTOR_TABLE, COFACTOR_COL, COFACTOR_ID_COL = "co_factors_list", "co_factor", 
 # Issue descriptions: the pulldown shows the full description,
 # iss_collection stores the matching id in its iss_id column.
 # ASSUMPTION: iss_description has an "iss_id" column. Change if yours differs.
-DESC_TABLE, DESC_COL, DESC_ID_COL = "iss_description", "iss_full_description", "iss_id"
+DESC_TABLE, DESC_COL, DESC_ID_COL = "iss_description", "iss_full_desc", "iss_id"
 
 
 @st.cache_resource
