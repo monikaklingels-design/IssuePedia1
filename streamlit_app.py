@@ -13,6 +13,10 @@ import pandas as pd             # tables ("DataFrames") and pivoting
 import html                     # html.escape() makes text safe to put inside HTML
 from supabase import create_client   # connection to the database
 
+# Use the full browser width instead of the narrow centered column.
+# IMPORTANT: this has to be the FIRST Streamlit command in the file.
+st.set_page_config(layout="wide")
+
 # ---------------------------------------------------------------------
 # SETTINGS: names of tables and columns in one place.
 # If you ever rename something in Supabase, change it here only.
@@ -288,7 +292,13 @@ st.subheader(f"Matrix for {selected_desc}")
 df = load_issue(iss_id)         # load again, so the new entry is included
 
 if df.empty:
-    st.info("No rows for this issue yet, or no read policy on iss_collection.")
+    st.info(
+        "No entries for this issue yet (or no read policy on iss_collection). "
+        "The empty matrix is shown below."
+    )
+    # An empty table with the right column names, so the code below still works
+    df = pd.DataFrame(columns=["level", "co_factor", "comment_short", "comment_long"])
+    matrix = pd.DataFrame()         # nothing to pivot; step 3 fills it with empty cells
 else:
     # Step 1: build the HTML of every entry (short comment + hover text)
     # and store it in a new column. apply(..., axis=1) calls make_cell
@@ -305,58 +315,60 @@ else:
         fill_value="",              # empty cells stay empty
     )
 
-    # Step 3: bring rows and columns into the order of the lookup tables.
-    # Values that are not in the lookup tables (old data) go at the end.
-    rows = [l for l in levels if l in matrix.index] + \
-           [l for l in matrix.index if l not in levels]
-    cols = [c for c in cofactors if c in matrix.columns] + \
-           [c for c in matrix.columns if c not in cofactors]
-    matrix = matrix.loc[rows, cols]
+# Step 3: show ALL levels as rows and ALL co-factors as columns, in the
+# order of the lookup tables, even when nothing was entered for them.
+# reindex() builds the table with exactly these rows and columns and
+# fills every combination that has no entry with an empty text.
+# Values found in the data but missing from the lookup tables (old
+# entries) are added at the end, so nothing disappears.
+rows = levels + [l for l in matrix.index if l not in levels]
+cols = cofactors + [c for c in matrix.columns if c not in cofactors]
+matrix = matrix.reindex(index=rows, columns=cols, fill_value="")
 
-    # Step 4: make the row/column labels safe for HTML and remove the
-    # small axis names in the top-left corner.
-    matrix = matrix.rename(index=html.escape, columns=html.escape)
-    matrix.index.name = None
-    matrix.columns.name = None
+# Step 4: make the row/column labels safe for HTML and remove the
+# small axis names in the top-left corner.
+matrix = matrix.rename(index=html.escape, columns=html.escape)
+matrix.index.name = None
+matrix.columns.name = None
 
-    # Step 5: CSS = the styling of the table. .has-tip is the underlined
-    # text that has a pop-up; cursor: help shows a question-mark cursor.
-    st.markdown(
-        """
-        <style>
-        .matrix table {border-collapse: collapse; width: 100%;}
-        .matrix th, .matrix td {
-            border: 1px solid rgba(128,128,128,0.4);
-            padding: 6px 8px;
-            vertical-align: top;
-            text-align: left;
-            white-space: normal;
-            overflow-wrap: anywhere;
-            min-width: 120px;
-        }
-        .matrix th {background: rgba(128,128,128,0.15);}
-        .matrix .has-tip {
-            border-bottom: 1px dotted currentColor;
-            cursor: help;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,     # allow our own HTML/CSS in st.markdown
-    )
+# Step 5: CSS = the styling of the table. .has-tip is the underlined
+# text that has a pop-up; cursor: help shows a question-mark cursor.
+st.markdown(
+    """
+    <style>
+    .matrix table {border-collapse: collapse; width: 100%;}
+    .matrix th, .matrix td {
+        border: 1px solid rgba(128,128,128,0.4);
+        padding: 6px 8px;
+        vertical-align: top;
+        text-align: left;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        min-width: 120px;
+    }
+    .matrix th {background: rgba(128,128,128,0.15);}
+    .matrix .has-tip {
+        border-bottom: 1px dotted currentColor;
+        cursor: help;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,     # allow our own HTML/CSS in st.markdown
+)
 
-    # Step 6: show the table. to_html(escape=False) keeps our <span> and
-    # <br> tags (we already escaped all user text in make_cell).
-    st.markdown(
-        f'<div class="matrix" style="overflow-x:auto">'
-        f'{matrix.to_html(escape=False, border=0)}</div>',
-        unsafe_allow_html=True,
-    )
+# Step 6: show the table. to_html(escape=False) keeps our <span> and
+# <br> tags (we already escaped all user text in make_cell).
+st.markdown(
+    f'<div class="matrix" style="overflow-x:auto">'
+    f'{matrix.to_html(escape=False, border=0)}</div>',
+    unsafe_allow_html=True,
+)
 
-    # ---------- Details table with long comments ----------
-    # An expander is a collapsible section. Useful to find rec_no values
-    # and to read long comments on a phone, where there is no hover.
-    with st.expander("All entries with long comments"):
-        show_cols = [c for c in
-                     ["rec_no", "level", "co_factor", "comment_short", "comment_long"]
-                     if c in df.columns]
-        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+# ---------- Details table with long comments ----------
+# An expander is a collapsible section. Useful to find rec_no values
+# and to read long comments on a phone, where there is no hover.
+with st.expander("All entries with long comments"):
+    show_cols = [c for c in
+                 ["rec_no", "level", "co_factor", "comment_short", "comment_long"]
+                 if c in df.columns]
+    st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
