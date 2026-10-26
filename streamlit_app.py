@@ -147,6 +147,72 @@ def join_cells(s):
 # =====================================================================
 # THE PAGE
 # =====================================================================
+# ---------------------------------------------------------------------
+# SECOND PAGE: HISTORICAL VIEW
+# ---------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def load_historical():
+    """Read the table iss_historical and return the four columns, oldest first."""
+    res = supabase.table("iss_historical").select("*").execute()
+    df = pd.DataFrame(res.data)
+    if df.empty:
+        return df
+
+    # Columns we want to show, in this order
+    wanted = ["start_year", "comment_short", "comment_long", "relevance"]
+    missing = [c for c in wanted if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"Column(s) {missing} not found in iss_historical. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    # Sort by year; numerically if all years are numbers, otherwise as text
+    years = pd.to_numeric(df["start_year"], errors="coerce")
+    if years.notna().all():
+        df = df.assign(_key=years).sort_values("_key")
+    else:
+        df = df.sort_values("start_year")
+    return df[wanted]
+
+
+# PAGE SWITCH: a radio button in the sidebar (left side) chooses the page.
+# Streamlit reruns the whole file on every click. For the historical view
+# we draw that page and then call st.stop(), so the matrix page below is
+# skipped. For "Matrix view" nothing happens here and the code simply
+# continues with the matrix page as before.
+page = st.sidebar.radio("Page", ["Matrix view", "Historical view"])
+
+if page == "Historical view":
+    st.title("Historical view")
+    try:
+        hist = load_historical()
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+    if hist.empty:
+        st.info("No rows in iss_historical yet, or no read policy on that table.")
+    else:
+        # column_config sets the width of single columns; the long comment
+        # gets more room than the others
+        st.dataframe(
+            hist,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "start_year": st.column_config.Column("Start year", width="small"),
+                "comment_short": st.column_config.Column("Short comment", width="medium"),
+                "comment_long": st.column_config.Column("Long comment", width="large"),
+                "relevance": st.column_config.Column("Relevance", width="small"),
+            },
+        )
+    st.stop()                       # nothing below this line runs on this page
+
+
+# =====================================================================
+# PAGE 1: MATRIX VIEW (everything below)
+# =====================================================================
 st.title("Input form for Issue Collection with Matrix View")
 
 # ---------- Load the lists for the pulldowns ----------
