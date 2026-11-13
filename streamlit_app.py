@@ -1,58 +1,56 @@
-# =====================================================================
-# Issue Collection with Matrix View
-# Streamlit (the web page) + Supabase (the database)
-#
-# How a Streamlit app works, in one sentence:
-# every time you click or type something, Streamlit runs this WHOLE
-# file again from top to bottom. That is why we use caching below,
-# so we don't ask the database the same question on every rerun.
-# =====================================================================
+ # streamlit_app.py
+# Issue matrix app.
+# Users add entries through a form. The matrix shows all comments of one
+# issue, with the levels as rows and the dimensions as columns.
 
-import streamlit as st          # builds the web page
-import pandas as pd             # tables ("DataFrames") and pivoting
-import html                     # html.escape() makes text safe to put inside HTML
-from supabase import create_client   # connection to the database
+import html                          # makes user text safe for HTML display
+import streamlit as st               # the web app framework
+import pandas as pd                  # tables: loading, sorting, pivoting
+from supabase import create_client   # connection to the Supabase database
 
-# Use the full browser width instead of the narrow centered column.
-# IMPORTANT: this has to be the FIRST Streamlit command in the file.
-st.set_page_config(layout="wide")
-
-# ---------------------------------------------------------------------
-# SETTINGS: names of tables and columns in one place.
-# If you ever rename something in Supabase, change it here only.
-# ---------------------------------------------------------------------
-# (table name, column with the text, column with the id used for sorting)
+# ------------------------------------------------------------------
+# SETTINGS
+# Each lookup table feeds one dropdown. For each of them we need:
+#   - the table name in Supabase
+#   - the column with the value that is shown (and saved)
+#   - the id column, which decides the sort order
+# If you rename something in the database again, change it here only.
+# ------------------------------------------------------------------
 LEVEL_TABLE, LEVEL_COL, LEVEL_ID_COL = "level_list", "level", "level_id"
-COFACTOR_TABLE, COFACTOR_COL, COFACTOR_ID_COL = "co_factors_list", "co_factor", "co_factor_id"
+DIMENSION_TABLE, DIMENSION_COL, DIMENSION_ID_COL = (
+    "dimension_list", "dimension", "dimension_id"
+)
 
-# The issue pulldown shows the full description, but iss_collection
-# stores the short id. ASSUMPTION: iss_description has a column "iss_id".
-DESC_TABLE, DESC_COL, DESC_ID_COL = "iss_description", "iss_full_desc", "iss_id"
-
-
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------
 # DATABASE CONNECTION
-# @st.cache_resource = "create this once and keep it", so the
-# connection is not rebuilt on every rerun.
-# st.secrets reads your URL and key from .streamlit/secrets.toml
-# ---------------------------------------------------------------------
+# The address (URL) and the key are read from Streamlit's secrets, so
+# they never appear in the code on GitHub.
+# @st.cache_resource keeps one connection alive for the whole app,
+# instead of creating a new one every time the page reruns.
+# ------------------------------------------------------------------
 @st.cache_resource
 def init_connection():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-
 supabase = init_connection()
 
+# ------------------------------------------------------------------
+# LOAD THE VALUES FOR A DROPDOWN
+# Reads a lookup table and returns its values as a list, sorted
+# ascending by the id column.
+# @st.cache_data remembers the result for 300 seconds (5 minutes), so
+# the database is not asked again on every click. Note: after a change
+# in a lookup table it can take up to 5 minutes until the app shows it.
+# ------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def load_options(table, col, id_col):
+    # select("*") asks for all columns; execute() sends the request
+    res = supabase.table(table).select("*").execute()
+    # res.data is a list of rows; pandas turns it into a table (DataFrame)
+    df = pd.DataFrame(res.data)
 
-# ---------------------------------------------------------------------
-# LOADING DATA
-# ---------------------------------------------------------------------
-def sorted_lookup(table, col, id_col):
-    """Read a whole lookup table and sort it by its id column."""
-    res = supabase.table(table).select("*").execute()   # SELECT * FROM table
-    df = pd.DataFrame(res.data)                         # list of dicts -> table
-
-    # Fail early with a helpful message if a column name is wrong
+    # Safety check: if a column name is wrong, say so with a clear
+    # message that lists the columns that really exist
     for c in (col, id_col):
         if c not in df.columns:
             raise KeyError(
@@ -60,381 +58,159 @@ def sorted_lookup(table, col, id_col):
                 f"Available columns: {list(df.columns)}"
             )
 
-    # Sort by id. If all ids are numbers, sort as numbers (so 2 comes before 10);
-    # otherwise sort as text.
-    ids = pd.to_numeric(df[id_col], errors="coerce")    # non-numbers become NaN
+    # Sort by the id column. If all ids are numbers, sort numerically
+    # (so 2 comes before 10), otherwise sort them as text.
+    ids = pd.to_numeric(df[id_col], errors="coerce")  # non-numbers become NaN
     if ids.notna().all():
         df = df.assign(_key=ids).sort_values("_key")
     else:
         df = df.sort_values(id_col)
-    return df
 
-
-# @st.cache_data = "remember the result for ttl seconds".
-# Lookup lists rarely change, so 300 seconds (5 minutes) is fine.
-@st.cache_data(ttl=300)
-def load_options(table, col, id_col):
-    """Return the values of a lookup table as a plain Python list."""
-    df = sorted_lookup(table, col, id_col)
+    # Return only the value column as a plain Python list,
+    # without empty values (dropna) and without duplicates
     return df[col].dropna().astype(str).drop_duplicates().tolist()
 
-
-@st.cache_data(ttl=300)
-def load_descriptions():
-    """Return a dict {full description: iss_id}, in sorted order."""
-    df = sorted_lookup(DESC_TABLE, DESC_COL, DESC_ID_COL)
-    df = df.dropna(subset=[DESC_COL, DESC_ID_COL])      # skip incomplete rows
-    return {str(r[DESC_COL]): str(r[DESC_ID_COL]) for _, r in df.iterrows()}
-
-
-# Entries change often, so only cache for 60 seconds. After saving we also
-# call load_issue.clear() to throw the cache away immediately.
+# ------------------------------------------------------------------
+# LOAD ALL ENTRIES OF ONE ISSUE
+# .eq("iss_id", iss_id) means "where iss_id = the given value".
+# The database does the filtering, so only matching rows are sent.
+# The cache lasts 60 seconds; after saving a new entry we clear it by
+# hand, so the new entry shows up immediately.
+# ------------------------------------------------------------------
 @st.cache_data(ttl=60)
 def load_issue(iss_id):
-    """Return all entries of ONE issue as a table, ordered by rec_no."""
     res = (
         supabase.table("iss_collection")
         .select("*")
-        .eq("iss_id", iss_id)       # WHERE iss_id = ...
-        .order("rec_no")            # ORDER BY rec_no
+        .eq("iss_id", iss_id)
         .execute()
     )
     return pd.DataFrame(res.data)
 
+# ------------------------------------------------------------------
+# JOIN SEVERAL COMMENTS INTO ONE CELL
+# Used by the pivot table below. It receives all comments that belong
+# in the same cell, and returns them as one text with a line break
+# (<br>) between them.
+# html.escape turns characters like < and > into harmless text, so
+# nobody can inject HTML code into your page through a comment.
+# ------------------------------------------------------------------
+def join_html(s):
+    return "<br>".join(html.escape(str(x)) for x in s.dropna())
 
-# ---------------------------------------------------------------------
-# SMALL HELPER FUNCTIONS
-# ---------------------------------------------------------------------
-def with_current(options, value):
-    """If a saved value is no longer in the pulldown list, add it at the end
-    so that editing an old entry does not silently change its value."""
-    return options if value in options else options + [value]
+# ==================================================================
+# THE PAGE (everything below runs from top to bottom on every click)
+# ==================================================================
+st.title("Issue matrix")
 
+# The issue that is shown in the matrix and used for new entries.
+# .strip() removes spaces before and after the text.
+iss_id = st.text_input("Issue ID", value="Iss01").strip()
 
-def make_cell(row):
-    """Build the HTML for ONE entry in the matrix.
+# ---------- ENTRY FORM ----------
+st.subheader("Add an entry")
 
-    - Without a long comment: just the short comment as text.
-    - With a long comment: the short comment wrapped in a <span> whose
-      'title' attribute holds the long comment. The browser shows the
-      title text as a pop-up when you hover over the span.
-    """
-    short = row.get("comment_short")
-    if short is None or pd.isna(short):
-        return ""
-    # html.escape turns < > & " into safe codes, so user text can never
-    # break the page or inject HTML.
-    short = html.escape(str(short))
-
-    long_text = row.get("comment_long")
-    if long_text is None or pd.isna(long_text) or not str(long_text).strip():
-        return short                                    # nothing to show on hover
-
-    tip = html.escape(str(long_text).strip(), quote=True)
-    # A real line break inside the text could end the HTML block early
-    # (Markdown treats empty lines specially), so we write line breaks as
-    # &#10; which the browser displays as a new line inside the pop-up.
-    tip = tip.replace("\r\n", "&#10;").replace("\n", "&#10;")
-    return f'<span class="has-tip" title="{tip}">{short}</span>'
-
-
-def join_cells(s):
-    """Several entries can sit in the same matrix cell (same level AND
-    co-factor). Put them under each other, separated by <br> (line break)."""
-    return "<br>".join(x for x in s if x)
-
-
-# =====================================================================
-# THE PAGE
-# =====================================================================
-# ---------------------------------------------------------------------
-# SECOND PAGE: HISTORICAL VIEW
-# ---------------------------------------------------------------------
-@st.cache_data(ttl=300)
-def load_historical():
-    """Read the table iss_historical and return the four columns, oldest first."""
-    res = supabase.table("iss_historical").select("*").execute()
-    df = pd.DataFrame(res.data)
-    if df.empty:
-        return df
-
-    # Columns we want to show, in this order
-    wanted = ["start_year", "comment_short", "comment_long", "relevance"]
-    missing = [c for c in wanted if c not in df.columns]
-    if missing:
-        raise KeyError(
-            f"Column(s) {missing} not found in iss_historical. "
-            f"Available columns: {list(df.columns)}"
-        )
-
-    # Sort by year; numerically if all years are numbers, otherwise as text
-    years = pd.to_numeric(df["start_year"], errors="coerce")
-    if years.notna().all():
-        df = df.assign(_key=years).sort_values("_key")
-    else:
-        df = df.sort_values("start_year")
-    return df[wanted]
-
-
-# PAGE SWITCH: a radio button in the sidebar (left side) chooses the page.
-# Streamlit reruns the whole file on every click. For the historical view
-# we draw that page and then call st.stop(), so the matrix page below is
-# skipped. For "Matrix view" nothing happens here and the code simply
-# continues with the matrix page as before.
-page = st.sidebar.radio("Page", ["Matrix view", "Historical view"])
-
-if page == "Historical view":
-    st.title("Historical view")
-    try:
-        hist = load_historical()
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
-
-    if hist.empty:
-        st.info("No rows in iss_historical yet, or no read policy on that table.")
-    else:
-        # column_config sets the width of single columns; the long comment
-        # gets more room than the others
-        st.dataframe(
-            hist,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "start_year": st.column_config.Column("Start year", width="small"),
-                "comment_short": st.column_config.Column("Short comment", width="medium"),
-                "comment_long": st.column_config.Column("Long comment", width="large"),
-                "relevance": st.column_config.Column("Relevance", width="small"),
-            },
-        )
-    st.stop()                       # nothing below this line runs on this page
-
-
-# =====================================================================
-# PAGE 1: MATRIX VIEW (everything below)
-# =====================================================================
-st.title("Input form for Issue Collection with Matrix View")
-
-# ---------- Load the lists for the pulldowns ----------
-# try/except: if loading fails, show the error on the page and stop,
-# instead of crashing with a long technical message.
+# Load the values for both dropdowns. If this fails (for example
+# because a table or column was renamed), show the reason and stop.
 try:
     levels = load_options(LEVEL_TABLE, LEVEL_COL, LEVEL_ID_COL)
-    cofactors = load_options(COFACTOR_TABLE, COFACTOR_COL, COFACTOR_ID_COL)
-    descriptions = load_descriptions()
+    dimensions = load_options(DIMENSION_TABLE, DIMENSION_COL, DIMENSION_ID_COL)
 except Exception as e:
     st.error(str(e))
-    st.stop()                       # nothing below this line runs
-
-if not descriptions:
-    st.warning("No rows found in iss_description (or no read policy).")
     st.stop()
 
-# ---------- Choose the issue ----------
-# The user sees the long description, we look up the matching id.
-selected_desc = st.selectbox("Issue", list(descriptions.keys()))
-iss_id = descriptions[selected_desc]
-st.caption(f"Issue ID: {iss_id}")
+# A form sends all its fields together when the button is clicked.
+# clear_on_submit=True empties the fields after saving.
+with st.form("add_entry", clear_on_submit=True):
+    # max_chars=80 stops typing after 80 characters
+    comment = st.text_input("Short comment (max. 80 characters)", max_chars=80)
+    level = st.selectbox("Level", levels)            # dropdown of levels
+    dimension = st.selectbox("Dimension", dimensions)  # dropdown of dimensions
+    submitted = st.form_submit_button("Add")         # True after a click
 
-df = load_issue(iss_id)             # all entries of this issue
-
-# ---------- Entry form: add OR update ----------
-st.subheader("Add or update an entry")
-
-mode = st.radio("Mode", ["Add new entry", "Update existing entry"], horizontal=True)
-is_update = mode == "Update existing entry"
-
-rec_no = None
-# Start values for the form fields (empty when adding a new entry)
-current = {"comment_short": "", "comment_long": "", "level": None, "co_factor": None}
-
-if is_update:
-    if df.empty:
-        st.info("No entries for this issue yet, so there is nothing to update.")
-        st.stop()
-
-    # Dict {rec_no: whole row}, so we can find an entry by its number
-    records = {int(r["rec_no"]): r for r in df.to_dict("records")}
-
-    def label(n):
-        """Text shown for each entry in the pulldown."""
-        r = records[n]
-        return f"#{n} | {r.get('level')} | {r.get('co_factor')} | {r.get('comment_short')}"
-
-    # format_func tells Streamlit how to display each rec_no
-    rec_no = st.selectbox("Entry to update", list(records.keys()), format_func=label)
-    rec = records[rec_no]
-    # "or ''" turns an empty database value (None) into an empty text
-    current = {
-        "comment_short": rec.get("comment_short") or "",
-        "comment_long": rec.get("comment_long") or "",
-        "level": rec.get("level"),
-        "co_factor": rec.get("co_factor"),
-    }
-
-level_opts = with_current(levels, current["level"]) if current["level"] else levels
-cof_opts = with_current(cofactors, current["co_factor"]) if current["co_factor"] else cofactors
-
-# Streamlit remembers what is typed into a field by its "key". If the key
-# contains the record number, the fields get fresh values whenever you pick
-# a different entry (a new key = a new field).
-k = f"{'u' if is_update else 'a'}_{rec_no}"
-
-# st.form collects all fields and only sends them when the button is pressed
-# (without a form, every keystroke would rerun the whole file).
-# clear_on_submit empties the fields after adding, but not after updating.
-with st.form(f"entry_form_{k}", clear_on_submit=not is_update):
-    comment = st.text_input(
-        "Short comment (max. 80 characters)",
-        value=current["comment_short"],
-        max_chars=80,
-        key=f"short_{k}",
-    )
-    comment_long = st.text_area(
-        "Long comment (shown as pop-up in the matrix)",
-        value=current["comment_long"],
-        height=150,
-        key=f"long_{k}",
-    )
-    level = st.selectbox(
-        "Level",
-        level_opts,
-        # index = which item is preselected (counting from 0)
-        index=level_opts.index(current["level"]) if current["level"] else 0,
-        key=f"level_{k}",
-    )
-    co_factor = st.selectbox(
-        "Co-factor",
-        cof_opts,
-        index=cof_opts.index(current["co_factor"]) if current["co_factor"] else 0,
-        key=f"cof_{k}",
-    )
-    submitted = st.form_submit_button("Update" if is_update else "Add")
-
-# ---------- Save when the button was pressed ----------
+# What happens after the button was clicked
 if submitted:
-    if not comment.strip():                 # .strip() removes spaces at both ends
-        st.warning("Please enter a short comment.")
+    if not iss_id:
+        st.warning("Please enter an Issue ID.")
+    elif not comment.strip():
+        st.warning("Please enter a comment.")
     else:
-        # The data we send to the database: column name -> value.
-        # user_id is NOT sent; the database fills it in via its default.
-        payload = {
-            "iss_id": iss_id,
-            "level": level,
-            "co_factor": co_factor,
-            "comment_short": comment.strip(),
-            "comment_long": comment_long.strip(),
-        }
         try:
-            if is_update:
-                # UPDATE iss_collection SET ... WHERE rec_no = <chosen entry>
-                res = (
-                    supabase.table("iss_collection")
-                    .update(payload)
-                    .eq("rec_no", rec_no)
-                    .execute()
-                )
-                # Without an UPDATE policy Supabase changes nothing and
-                # raises no error. An empty result tells us that happened.
-                if not res.data:
-                    st.warning(
-                        "Nothing was updated. Check that an UPDATE policy "
-                        "exists on iss_collection."
-                    )
-                else:
-                    load_issue.clear()      # forget the cached entries
-                    st.success(f"Entry #{rec_no} updated.")
-            else:
-                # INSERT INTO iss_collection ...
-                supabase.table("iss_collection").insert(payload).execute()
-                load_issue.clear()
-                st.success("Entry added.")
+            # Add one new row to the table iss_collection.
+            # The keys on the left are the column names in the database.
+            supabase.table("iss_collection").insert({
+                "iss_id": iss_id,
+                "level": level,
+                "dimension": dimension,
+                "comment_short": comment.strip(),
+            }).execute()
+            load_issue.clear()   # forget old data so the matrix is fresh
+            st.success("Entry added.")
         except Exception as e:
+            # Typical causes: missing permission (policy), a value that
+            # does not match a lookup table, or a comment that is too long
             st.error(f"Could not save: {e}")
 
-# ---------- Matrix ----------
-st.subheader(f"Matrix for {selected_desc}")
+# ---------- MATRIX ----------
+st.subheader(f"Matrix for {iss_id}")
 
-df = load_issue(iss_id)         # load again, so the new entry is included
+df = load_issue(iss_id)
 
 if df.empty:
-    st.info(
-        "No entries for this issue yet (or no read policy on iss_collection). "
-        "The empty matrix is shown below."
-    )
-    # An empty table with the right column names, so the code below still works
-    df = pd.DataFrame(columns=["level", "co_factor", "comment_short", "comment_long"])
-    matrix = pd.DataFrame()         # nothing to pivot; step 3 fills it with empty cells
+    st.info("No rows for this Issue ID yet, or no read policy on iss_collection.")
 else:
-    # Step 1: build the HTML of every entry (short comment + hover text)
-    # and store it in a new column. apply(..., axis=1) calls make_cell
-    # once for every row.
-    df = df.assign(cell_html=df.apply(make_cell, axis=1))
-
-    # Step 2: pivot. Rows = level, columns = co-factor, cell content =
-    # all cell_html pieces that belong together, joined by join_cells.
+    # PIVOT: levels become the rows, dimensions become the columns,
+    # and all comments that fall in the same cell are joined together
+    # by join_html. Empty cells stay empty (fill_value="").
     matrix = df.pivot_table(
         index="level",
-        columns="co_factor",
-        values="cell_html",
-        aggfunc=join_cells,
-        fill_value="",              # empty cells stay empty
+        columns="dimension",
+        values="comment_short",
+        aggfunc=join_html,
+        fill_value="",
     )
 
-# Step 3: show ALL levels as rows and ALL co-factors as columns, in the
-# order of the lookup tables, even when nothing was entered for them.
-# reindex() builds the table with exactly these rows and columns and
-# fills every combination that has no entry with an empty text.
-# Values found in the data but missing from the lookup tables (old
-# entries) are added at the end, so nothing disappears.
-rows = levels + [l for l in matrix.index if l not in levels]
-cols = cofactors + [c for c in matrix.columns if c not in cofactors]
-matrix = matrix.reindex(index=rows, columns=cols, fill_value="")
+    # ORDER: pivot_table sorts alphabetically. We want the order of the
+    # lookup tables instead (sorted by id). Values that are not in the
+    # lookup tables (for example old data) are placed at the end.
+    rows = [l for l in levels if l in matrix.index] + \
+           [l for l in matrix.index if l not in levels]
+    cols = [d for d in dimensions if d in matrix.columns] + \
+           [d for d in matrix.columns if d not in dimensions]
+    matrix = matrix.loc[rows, cols]
 
-# Step 4: make the row/column labels safe for HTML and remove the
-# small axis names in the top-left corner.
-matrix = matrix.rename(index=html.escape, columns=html.escape)
-matrix.index.name = None
-matrix.columns.name = None
+    # Make the row and column labels safe for HTML, and remove the axis
+    # names so the top-left corner of the table stays empty
+    matrix = matrix.rename(index=html.escape, columns=html.escape)
+    matrix.index.name = None
+    matrix.columns.name = None
 
-# Step 5: CSS = the styling of the table. .has-tip is the underlined
-# text that has a pop-up; cursor: help shows a question-mark cursor.
-st.markdown(
-    """
-    <style>
-    .matrix table {border-collapse: collapse; width: 100%;}
-    .matrix th, .matrix td {
-        border: 1px solid rgba(128,128,128,0.4);
-        padding: 6px 8px;
-        vertical-align: top;
-        text-align: left;
-        white-space: normal;
-        overflow-wrap: anywhere;
-        min-width: 120px;
-    }
-    .matrix th {background: rgba(128,128,128,0.15);}
-    .matrix .has-tip {
-        border-bottom: 1px dotted currentColor;
-        cursor: help;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,     # allow our own HTML/CSS in st.markdown
-)
+    # STYLE: borders, padding, and text that wraps inside the cells.
+    # The colours are semi-transparent (rgba), so the table looks fine
+    # in both the light and the dark theme.
+    st.markdown(
+        """
+        <style>
+        .matrix table {border-collapse: collapse; width: 100%;}
+        .matrix th, .matrix td {
+            border: 1px solid rgba(128,128,128,0.4);
+            padding: 6px 8px;
+            vertical-align: top;
+            text-align: left;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            min-width: 120px;
+        }
+        .matrix th {background: rgba(128,128,128,0.15);}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# Step 6: show the table. to_html(escape=False) keeps our <span> and
-# <br> tags (we already escaped all user text in make_cell).
-st.markdown(
-    f'<div class="matrix" style="overflow-x:auto">'
-    f'{matrix.to_html(escape=False, border=0)}</div>',
-    unsafe_allow_html=True,
-)
-
-# ---------- Details table with long comments ----------
-# An expander is a collapsible section. Useful to find rec_no values
-# and to read long comments on a phone, where there is no hover.
-with st.expander("All entries with long comments"):
-    show_cols = [c for c in
-                 ["rec_no", "level", "co_factor", "comment_short", "comment_long"]
-                 if c in df.columns]
-    st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+    # SHOW the matrix as an HTML table. The surrounding div adds a
+    # horizontal scrollbar if the table is wider than the page.
+    st.markdown(
+        f'<div class="matrix" style="overflow-x:auto">'
+        f'{matrix.to_html(escape=False, border=0)}</div>',
+        unsafe_allow_html=True,
+    )
